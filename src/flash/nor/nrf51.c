@@ -74,6 +74,35 @@ enum nrf51_ficr_registers {
 	NRF51_FICR_BLE_1MBIT4		= NRF51_FICR_REG(0x0FC),
 };
 
+enum nrf52_ficr_registers {
+	NRF52_FICR_BASE = 0x10000000, /* Factory Information Configuration Registers */
+
+#define NRF52_FICR_REG(offset) (NRF52_FICR_BASE + offset)
+
+	NRF52_FICR_CODEPAGESIZE		= NRF52_FICR_REG(0x010),
+	NRF52_FICR_CODESIZE		= NRF52_FICR_REG(0x014),
+	NRF52_FICR_DEVICEID0		= NRF52_FICR_REG(0x060),
+	NRF52_FICR_DEVICEID1		= NRF52_FICR_REG(0x064),
+	NRF52_FICR_ER0			= NRF52_FICR_REG(0x080),
+	NRF52_FICR_ER1			= NRF52_FICR_REG(0x084),
+	NRF52_FICR_ER2			= NRF52_FICR_REG(0x088),
+	NRF52_FICR_ER3			= NRF52_FICR_REG(0x08C),
+	NRF52_FICR_IR0			= NRF52_FICR_REG(0x090),
+	NRF52_FICR_IR1			= NRF52_FICR_REG(0x094),
+	NRF52_FICR_IR2			= NRF52_FICR_REG(0x098),
+	NRF52_FICR_IR3			= NRF52_FICR_REG(0x09C),
+	NRF52_FICR_DEVICEADDRTYPE	= NRF52_FICR_REG(0x0A0),
+	NRF52_FICR_DEVICEADDR0		= NRF52_FICR_REG(0x0A4),
+	NRF52_FICR_DEVICEADDR1		= NRF52_FICR_REG(0x0A8),
+	NRF52_FICR_INFO_PART		= NRF52_FICR_REG(0x100),
+	NRF52_FICR_INFO_VARIANT		= NRF52_FICR_REG(0x104),
+	NRF52_FICR_INFO_PACKAGE		= NRF52_FICR_REG(0x108),
+	NRF52_FICR_INFO_RAM 		= NRF52_FICR_REG(0x10C),
+	NRF52_FICR_INFO_FLASH		= NRF52_FICR_REG(0x110),
+};
+
+
+
 enum nrf51_uicr_registers {
 	NRF51_UICR_BASE = 0x10001000, /* User Information
 				       * Configuration Regsters */
@@ -111,7 +140,7 @@ enum nrf51_nvmc_config_bits {
 struct nrf51_info {
 	uint32_t code_page_size;
 	uint32_t code_memory_size;
-
+    int (*probe) (struct flash_bank *bank);
 	struct {
 		bool probed;
 		int (*write) (struct flash_bank *bank,
@@ -120,6 +149,8 @@ struct nrf51_info {
 	} bank[2];
 	struct target *target;
 };
+
+
 
 struct nrf51_device_spec {
 	uint16_t hwid;
@@ -374,6 +405,28 @@ static const struct nrf51_device_spec nrf51_known_devices_table[] = {
 	},
 };
 
+
+struct nrf52_device_spec {
+	uint32_t part;
+	uint32_t flash_size;
+};
+
+static const struct nrf52_device_spec nrf52_known_devices_table[] = {
+	/* nRF52832 Devices */
+	{
+		.part		= 0x520000,
+		.flash_size	= 128,
+	},
+    {
+		.part		= 0x520000,
+		.flash_size	= 256,
+	},
+	{
+		.part		= 0x520000,
+		.flash_size	= 512,
+	},
+};
+
 static int nrf51_bank_is_probed(struct flash_bank *bank)
 {
 	struct nrf51_info *chip = bank->driver_priv;
@@ -383,8 +436,9 @@ static int nrf51_bank_is_probed(struct flash_bank *bank)
 	return chip->bank[bank->bank_number].probed;
 }
 static int nrf51_probe(struct flash_bank *bank);
+static int nrf52_probe(struct flash_bank *bank);
 
-static int nrf51_get_probed_chip_if_halted(struct flash_bank *bank, struct nrf51_info **chip)
+static int nrf_get_probed_chip_if_halted(struct flash_bank *bank, struct nrf51_info **chip )
 {
 	if (bank->target->state != TARGET_HALTED) {
 		LOG_ERROR("Target not halted");
@@ -397,9 +451,15 @@ static int nrf51_get_probed_chip_if_halted(struct flash_bank *bank, struct nrf51
 	if (probed < 0)
 		return probed;
 	else if (!probed)
-		return nrf51_probe(bank);
+		return (*chip)->probe(bank);
 	else
 		return ERROR_OK;
+}
+
+static int nrf_probe(struct flash_bank *bank)
+{
+    struct nrf51_info *chip = bank->driver_priv;
+    return chip->probe(bank);
 }
 
 static int nrf51_wait_for_nvmc(struct nrf51_info *chip)
@@ -568,7 +628,7 @@ static int nrf51_protect(struct flash_bank *bank, int set, int first, int last)
 	if (bank->base == NRF51_UICR_BASE)
 		return ERROR_FAIL;
 
-	res = nrf51_get_probed_chip_if_halted(bank, &chip);
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
 	if (res != ERROR_OK)
 		return res;
 
@@ -612,6 +672,30 @@ static int nrf51_protect(struct flash_bank *bank, int set, int first, int last)
 
 	return ERROR_OK;
 }
+
+static int nrf52_protect(struct flash_bank *bank, int set, int first, int last)
+{
+	int res;
+	struct nrf51_info *chip;
+
+	/* UICR cannot be write protected so just bail out early */
+	if (bank->base == NRF51_UICR_BASE)
+		return ERROR_FAIL;
+
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
+	if (res != ERROR_OK)
+		return res;
+
+	if (first != 0) {
+		LOG_ERROR("Code region 0 must start at the begining of the bank");
+		return ERROR_FAIL;
+	}
+
+	nrf51_protect_check(bank);
+
+	return ERROR_OK;
+}
+
 
 static int nrf51_probe(struct flash_bank *bank)
 {
@@ -706,16 +790,113 @@ static int nrf51_probe(struct flash_bank *bank)
 	return ERROR_OK;
 }
 
-static int nrf51_auto_probe(struct flash_bank *bank)
+
+static int nrf52_probe(struct flash_bank *bank)
+{
+	uint32_t part;
+    uint32_t flash_size;
+	int res;
+	struct nrf51_info *chip = bank->driver_priv;
+
+	res = target_read_u32(chip->target, NRF52_FICR_INFO_PART, &part);
+	if (res != ERROR_OK) {
+		LOG_ERROR("Couldn't read INFO.PART register");
+		return res;
+	}
+
+    res = target_read_u32(chip->target, NRF52_FICR_INFO_FLASH, &flash_size);
+	if (res != ERROR_OK) {
+		LOG_ERROR("Couldn't read INFO.FLASH register");
+		return res;
+	}
+	const struct nrf52_device_spec *spec = NULL;
+	for (size_t i = 0; i < ARRAY_SIZE(nrf52_known_devices_table); i++)
+		if (   part == nrf52_known_devices_table[i].part
+            && flash_size == nrf52_known_devices_table[i].flash_size) {
+			spec = &nrf52_known_devices_table[i];
+			break;
+		}
+
+	if (!chip->bank[0].probed && !chip->bank[1].probed) {
+		if (spec)
+			LOG_INFO("nRF52832 %ukB Flash", spec->flash_size);
+		else
+			LOG_WARNING("Unknown device (PART ID 0x%08" PRIx32 ")", part);
+	}
+
+
+	if (bank->base == NRF51_FLASH_BASE) {
+		res = target_read_u32(chip->target, NRF52_FICR_CODEPAGESIZE,
+				      &chip->code_page_size);
+		if (res != ERROR_OK) {
+			LOG_ERROR("Couldn't read code page size");
+			return res;
+		}
+
+		res = target_read_u32(chip->target, NRF52_FICR_CODESIZE,
+				      &chip->code_memory_size);
+		if (res != ERROR_OK) {
+			LOG_ERROR("Couldn't read code memory size");
+			return res;
+		}
+
+		if (spec && (chip->code_memory_size*chip->code_page_size/1024) != spec->flash_size) {
+			LOG_ERROR("Chip's reported Flash capacity does not match expected one");
+			return ERROR_FAIL;
+		}
+
+		bank->size = chip->code_memory_size * chip->code_page_size;
+		bank->num_sectors = chip->code_memory_size;
+		bank->sectors = calloc(bank->num_sectors,
+				       sizeof((bank->sectors)[0]));
+		if (!bank->sectors)
+			return ERROR_FLASH_BANK_NOT_PROBED;
+
+		/* Fill out the sector information: all NRF51 sectors are the same size and
+		 * there is always a fixed number of them. */
+		for (int i = 0; i < bank->num_sectors; i++) {
+			bank->sectors[i].size = chip->code_page_size;
+			bank->sectors[i].offset	= i * chip->code_page_size;
+
+			/* mark as unknown */
+			bank->sectors[i].is_erased = -1;
+			bank->sectors[i].is_protected = -1;
+		}
+
+		nrf51_protect_check(bank);
+
+		chip->bank[0].probed = true;
+	} else {
+		bank->size = NRF51_UICR_SIZE;
+		bank->num_sectors = 1;
+		bank->sectors = calloc(bank->num_sectors,
+				       sizeof((bank->sectors)[0]));
+		if (!bank->sectors)
+			return ERROR_FLASH_BANK_NOT_PROBED;
+
+		bank->sectors[0].size = bank->size;
+		bank->sectors[0].offset	= 0;
+
+		/* mark as unknown */
+		bank->sectors[0].is_erased = 0;
+		bank->sectors[0].is_protected = 0;
+
+		chip->bank[1].probed = true;
+	}
+
+	return ERROR_OK;
+}
+
+static int nrf_auto_probe(struct flash_bank *bank)
 {
 	int probed = nrf51_bank_is_probed(bank);
-
+    struct nrf51_info *chip = bank->driver_priv;
 	if (probed < 0)
 		return probed;
 	else if (probed)
 		return ERROR_OK;
 	else
-		return nrf51_probe(bank);
+		return chip->probe(bank);
 }
 
 static struct flash_sector *nrf51_find_sector_by_address(struct flash_bank *bank, uint32_t address)
@@ -959,7 +1140,7 @@ static int nrf51_erase(struct flash_bank *bank, int first, int last)
 	int res;
 	struct nrf51_info *chip;
 
-	res = nrf51_get_probed_chip_if_halted(bank, &chip);
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
 	if (res != ERROR_OK)
 		return res;
 
@@ -1069,7 +1250,7 @@ static int nrf51_write(struct flash_bank *bank, const uint8_t *buffer,
 	int res;
 	struct nrf51_info *chip;
 
-	res = nrf51_get_probed_chip_if_halted(bank, &chip);
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
 	if (res != ERROR_OK)
 		return res;
 
@@ -1110,12 +1291,54 @@ FLASH_BANK_COMMAND_HANDLER(nrf51_flash_bank_command)
 		chip->bank[bank->bank_number].write = nrf51_uicr_flash_write;
 		break;
 	}
-
+    chip->probe = &nrf51_probe;
 	chip->bank[bank->bank_number].probed = false;
 	bank->driver_priv = chip;
 
 	return ERROR_OK;
 }
+
+
+FLASH_BANK_COMMAND_HANDLER(nrf52_flash_bank_command)
+{
+	static struct nrf51_info *chip;
+
+	switch (bank->base) {
+	case NRF51_FLASH_BASE:
+		bank->bank_number = 0;
+		break;
+	case NRF51_UICR_BASE:
+		bank->bank_number = 1;
+		break;
+	default:
+		LOG_ERROR("Invalid bank address 0x%08" PRIx32, bank->base);
+		return ERROR_FAIL;
+	}
+
+	if (!chip) {
+		/* Create a new chip */
+		chip = calloc(1, sizeof(*chip));
+		if (!chip)
+			return ERROR_FAIL;
+
+		chip->target = bank->target;
+	}
+
+	switch (bank->base) {
+	case NRF51_FLASH_BASE:
+		chip->bank[bank->bank_number].write = nrf51_code_flash_write;
+		break;
+	case NRF51_UICR_BASE:
+		chip->bank[bank->bank_number].write = nrf51_uicr_flash_write;
+		break;
+	}
+    chip->probe = &nrf52_probe;
+	chip->bank[bank->bank_number].probed = false;
+	bank->driver_priv = chip;
+
+	return ERROR_OK;
+}
+
 
 COMMAND_HANDLER(nrf51_handle_mass_erase_command)
 {
@@ -1131,7 +1354,7 @@ COMMAND_HANDLER(nrf51_handle_mass_erase_command)
 
 	struct nrf51_info *chip;
 
-	res = nrf51_get_probed_chip_if_halted(bank, &chip);
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
 	if (res != ERROR_OK)
 		return res;
 
@@ -1181,7 +1404,7 @@ static int nrf51_info(struct flash_bank *bank, char *buf, int buf_size)
 
 	struct nrf51_info *chip;
 
-	res = nrf51_get_probed_chip_if_halted(bank, &chip);
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
 	if (res != ERROR_OK)
 		return res;
 
@@ -1329,8 +1552,115 @@ struct flash_driver nrf51_flash = {
 	.protect		= nrf51_protect,
 	.write			= nrf51_write,
 	.read			= default_flash_read,
-	.probe			= nrf51_probe,
-	.auto_probe		= nrf51_auto_probe,
+	.probe			= nrf_probe,
+	.auto_probe		= nrf_auto_probe,
+	.erase_check		= default_flash_blank_check,
+	.protect_check		= nrf51_protect_check,
+};
+
+
+static int nrf52_info(struct flash_bank *bank, char *buf, int buf_size)
+{
+	int res;
+
+	struct nrf51_info *chip;
+
+	res = nrf_get_probed_chip_if_halted(bank, &chip);
+	if (res != ERROR_OK)
+		return res;
+
+	static struct {
+		const uint32_t address;
+		uint32_t value;
+	} ficr[] = {
+		{ .address = NRF52_FICR_CODEPAGESIZE	},
+		{ .address = NRF52_FICR_CODESIZE	},
+		{ .address = NRF52_FICR_DEVICEID0	},
+		{ .address = NRF52_FICR_DEVICEID1	},
+		{ .address = NRF52_FICR_ER0		},
+		{ .address = NRF52_FICR_ER1		},
+		{ .address = NRF52_FICR_ER2		},
+		{ .address = NRF52_FICR_ER3		},
+		{ .address = NRF52_FICR_IR0		},
+		{ .address = NRF52_FICR_IR1		},
+		{ .address = NRF52_FICR_IR2		},
+		{ .address = NRF52_FICR_IR3		},
+		{ .address = NRF52_FICR_DEVICEADDRTYPE	},
+		{ .address = NRF52_FICR_DEVICEADDR0	},
+		{ .address = NRF52_FICR_DEVICEADDR1	},
+		{ .address = NRF52_FICR_INFO_PART	},
+		{ .address = NRF52_FICR_INFO_VARIANT	},
+		{ .address = NRF52_FICR_INFO_PACKAGE	},
+		{ .address = NRF52_FICR_INFO_RAM	},
+		{ .address = NRF52_FICR_INFO_FLASH	},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(ficr); i++) {
+		res = target_read_u32(chip->target, ficr[i].address,
+				      &ficr[i].value);
+		if (res != ERROR_OK) {
+			LOG_ERROR("Couldn't read %" PRIx32, ficr[i].address);
+			return res;
+		}
+	}
+
+	snprintf(buf, buf_size,
+		 "\n[factory information control block]\n\n"
+		 "code page size: %"PRIu32"B\n"
+		 "code memory size: %"PRIu32"pages\n"
+		 "device id: 0x%"PRIx32"%08"PRIx32"\n"
+		 "encryption root: 0x%08"PRIx32"%08"PRIx32"%08"PRIx32"%08"PRIx32"\n"
+		 "identity root: 0x%08"PRIx32"%08"PRIx32"%08"PRIx32"%08"PRIx32"\n"
+		 "device address type: 0x%"PRIx32"\n"
+		 "device address: 0x%"PRIx32"%08"PRIx32"\n"
+		 "part code: %"PRIx32"\n"
+		 "variant: %"PRIu32"\n"
+		 "package option: %"PRIu32"\n"
+		 "ram variant: %"PRIu32"\n"
+		 "flash variant: %"PRIu32"\n",
+		 ficr[0].value,
+		 ficr[1].value,
+		 ficr[2].value,ficr[3].value,
+		 ficr[4].value,ficr[5].value,ficr[6].value,ficr[7].value,
+		 ficr[8].value,ficr[9].value,ficr[10].value,ficr[11].value,
+		 ficr[12].value,
+		 ficr[13].value,ficr[14].value,
+         ficr[15].value,
+         ficr[16].value,
+         ficr[17].value,
+         ficr[18].value,
+         ficr[19].value
+		 );
+
+	return ERROR_OK;
+}
+
+
+
+
+
+static const struct command_registration nrf52_command_handlers[] = {
+	{
+		.name	= "nrf52",
+		.mode	= COMMAND_ANY,
+		.help	= "nrf52 flash command group",
+		.usage	= "",
+		.chain	= nrf51_exec_command_handlers,
+	},
+	COMMAND_REGISTRATION_DONE
+};
+
+struct flash_driver nrf52_flash = {
+	.name			= "nrf52",
+	.commands		= nrf52_command_handlers,
+	.flash_bank_command	= nrf52_flash_bank_command,
+	.info			= nrf52_info,
+	.erase			= nrf51_erase,
+	.protect		= nrf52_protect,
+	.write			= nrf51_write,
+	.read			= default_flash_read,
+	.probe			= nrf_probe,
+	.auto_probe		= nrf_auto_probe,
 	.erase_check		= default_flash_blank_check,
 	.protect_check		= nrf51_protect_check,
 };
